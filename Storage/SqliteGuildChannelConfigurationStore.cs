@@ -60,7 +60,54 @@ public interface IGuildChannelConfigurationStore
     Task RemoveEventBackgroundObjectKeyAsync(
         ulong guildId,
         CancellationToken cancellationToken = default);
+
+    Task<WarningIssueResult> AddWarningAsync(
+        ulong guildId,
+        ulong memberId,
+        ulong moderatorId,
+        string reason,
+        DateTimeOffset createdAt,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<MemberWarning>> GetWarningsAsync(
+        ulong guildId,
+        ulong memberId,
+        CancellationToken cancellationToken = default);
+
+    Task<WarningEscalation?> GetWarningEscalationAsync(
+        ulong guildId,
+        CancellationToken cancellationToken = default);
+
+    Task SetWarningEscalationAsync(
+        ulong guildId,
+        WarningEscalation escalation,
+        CancellationToken cancellationToken = default);
+
+    Task RemoveWarningEscalationAsync(
+        ulong guildId,
+        CancellationToken cancellationToken = default);
+
+    Task RemoveWarningEscalationApplicationAsync(
+        ulong guildId,
+        ulong memberId,
+        CancellationToken cancellationToken = default);
 }
+
+public sealed record MemberWarning(
+    long Id,
+    ulong GuildId,
+    ulong MemberId,
+    ulong ModeratorId,
+    string Reason,
+    DateTimeOffset CreatedAt);
+
+public sealed record WarningEscalation(int Threshold, int TimeoutMinutes);
+
+public sealed record WarningIssueResult(
+    MemberWarning Warning,
+    int WarningCount,
+    WarningEscalation? Escalation,
+    bool ShouldApplyEscalation);
 
 public sealed class SqliteGuildChannelConfigurationStore : IGuildChannelConfigurationStore, IDisposable
 {
@@ -69,6 +116,9 @@ public sealed class SqliteGuildChannelConfigurationStore : IGuildChannelConfigur
     private const string EventChannelColumn = "EventChannelId";
     private const string EventBackgroundObjectKeyColumn = "EventBackgroundObjectKey";
     private const string LegacyEventBackgroundImageColumn = "EventBackgroundImage";
+    private const string GuildWarningSettingsTable = "GuildWarningSettings";
+    private const string WarningEscalationApplicationsTable = "WarningEscalationApplications";
+    private const string MemberWarningsTable = "MemberWarnings";
 
     private readonly string _connectionString;
     private readonly SemaphoreSlim _initializationGate = new(1, 1);
@@ -226,6 +276,240 @@ public sealed class SqliteGuildChannelConfigurationStore : IGuildChannelConfigur
         CancellationToken cancellationToken = default) =>
         RemoveSettingAsync(guildId, EventBackgroundObjectKeyColumn, cancellationToken);
 
+    public async Task<WarningIssueResult> AddWarningAsync(
+        ulong guildId,
+        ulong memberId,
+        ulong moderatorId,
+        string reason,
+        DateTimeOffset createdAt,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+        long warningId;
+        await using (var insertCommand = connection.CreateCommand())
+        {
+            insertCommand.Transaction = transaction;
+            insertCommand.CommandText = $"""
+                INSERT INTO {MemberWarningsTable}
+                    (GuildId, MemberId, ModeratorId, Reason, CreatedAtUnixSeconds)
+                VALUES
+                    ($guildId, $memberId, $moderatorId, $reason, $createdAtUnixSeconds);
+                SELECT last_insert_rowid();
+                """;
+            insertCommand.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+            insertCommand.Parameters.AddWithValue("$memberId", ToDatabaseValue(memberId));
+            insertCommand.Parameters.AddWithValue("$moderatorId", ToDatabaseValue(moderatorId));
+            insertCommand.Parameters.AddWithValue("$reason", reason);
+            insertCommand.Parameters.AddWithValue("$createdAtUnixSeconds", createdAt.ToUnixTimeSeconds());
+            warningId = Convert.ToInt64(
+                await insertCommand.ExecuteScalarAsync(cancellationToken),
+                CultureInfo.InvariantCulture);
+        }
+
+        var warningCount = 0;
+        await using (var countCommand = connection.CreateCommand())
+        {
+            countCommand.Transaction = transaction;
+            countCommand.CommandText = $"""
+                SELECT COUNT(*)
+                FROM {MemberWarningsTable}
+                WHERE GuildId = $guildId
+                    AND MemberId = $memberId;
+                """;
+            countCommand.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+            countCommand.Parameters.AddWithValue("$memberId", ToDatabaseValue(memberId));
+            warningCount = Convert.ToInt32(
+                await countCommand.ExecuteScalarAsync(cancellationToken),
+                CultureInfo.InvariantCulture);
+        }
+
+        WarningEscalation? escalation = null;
+        await using (var settingsCommand = connection.CreateCommand())
+        {
+            settingsCommand.Transaction = transaction;
+            settingsCommand.CommandText = $"""
+                SELECT TimeoutThreshold, TimeoutMinutes
+                FROM {GuildWarningSettingsTable}
+                WHERE GuildId = $guildId;
+                """;
+            settingsCommand.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+
+            await using var reader = await settingsCommand.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                escalation = new WarningEscalation(reader.GetInt32(0), reader.GetInt32(1));
+            }
+        }
+
+        var shouldApplyEscalation = false;
+        if (escalation is not null && warningCount >= escalation.Threshold)
+        {
+            await using var escalationCommand = connection.CreateCommand();
+            escalationCommand.Transaction = transaction;
+            escalationCommand.CommandText = $"""
+                INSERT INTO {WarningEscalationApplicationsTable} (GuildId, MemberId)
+                SELECT $guildId, $memberId
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM {WarningEscalationApplicationsTable}
+                    WHERE GuildId = $guildId
+                        AND MemberId = $memberId
+                );
+                """;
+            escalationCommand.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+            escalationCommand.Parameters.AddWithValue("$memberId", ToDatabaseValue(memberId));
+            shouldApplyEscalation =
+                await escalationCommand.ExecuteNonQueryAsync(cancellationToken) == 1;
+        }
+
+        await transaction.CommitAsync(cancellationToken);
+
+        return new WarningIssueResult(
+            new MemberWarning(warningId, guildId, memberId, moderatorId, reason, createdAt),
+            warningCount,
+            escalation,
+            shouldApplyEscalation);
+    }
+
+    public async Task<IReadOnlyList<MemberWarning>> GetWarningsAsync(
+        ulong guildId,
+        ulong memberId,
+        CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT WarningId, ModeratorId, Reason, CreatedAtUnixSeconds
+            FROM {MemberWarningsTable}
+            WHERE GuildId = $guildId
+                AND MemberId = $memberId
+            ORDER BY WarningId DESC;
+            """;
+        command.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+        command.Parameters.AddWithValue("$memberId", ToDatabaseValue(memberId));
+
+        var warnings = new List<MemberWarning>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            warnings.Add(
+                new MemberWarning(
+                    reader.GetInt64(0),
+                    guildId,
+                    memberId,
+                    ParseSnowflake(reader.GetString(1), "ModeratorId"),
+                    reader.GetString(2),
+                    DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(3))));
+        }
+
+        return warnings;
+    }
+
+    public async Task<WarningEscalation?> GetWarningEscalationAsync(
+        ulong guildId,
+        CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            SELECT TimeoutThreshold, TimeoutMinutes
+            FROM {GuildWarningSettingsTable}
+            WHERE GuildId = $guildId;
+            """;
+        command.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        return await reader.ReadAsync(cancellationToken)
+            ? new WarningEscalation(reader.GetInt32(0), reader.GetInt32(1))
+            : null;
+    }
+
+    public async Task SetWarningEscalationAsync(
+        ulong guildId,
+        WarningEscalation escalation,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(escalation.Threshold);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(escalation.TimeoutMinutes);
+
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = $"""
+                INSERT INTO {GuildWarningSettingsTable} (GuildId, TimeoutThreshold, TimeoutMinutes)
+                VALUES ($guildId, $threshold, $timeoutMinutes)
+                ON CONFLICT (GuildId) DO UPDATE
+                SET TimeoutThreshold = excluded.TimeoutThreshold,
+                    TimeoutMinutes = excluded.TimeoutMinutes;
+                """;
+            command.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+            command.Parameters.AddWithValue("$threshold", escalation.Threshold);
+            command.Parameters.AddWithValue("$timeoutMinutes", escalation.TimeoutMinutes);
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await ClearWarningEscalationApplicationsAsync(connection, transaction, guildId, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task RemoveWarningEscalationAsync(
+        ulong guildId,
+        CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var transaction = (SqliteTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+        await using (var command = connection.CreateCommand())
+        {
+            command.Transaction = transaction;
+            command.CommandText = $"""
+                DELETE FROM {GuildWarningSettingsTable}
+                WHERE GuildId = $guildId;
+                """;
+            command.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await ClearWarningEscalationApplicationsAsync(connection, transaction, guildId, cancellationToken);
+        await transaction.CommitAsync(cancellationToken);
+    }
+
+    public async Task RemoveWarningEscalationApplicationAsync(
+        ulong guildId,
+        ulong memberId,
+        CancellationToken cancellationToken = default)
+    {
+        await InitializeAsync(cancellationToken);
+
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = $"""
+            DELETE FROM {WarningEscalationApplicationsTable}
+            WHERE GuildId = $guildId
+                AND MemberId = $memberId;
+            """;
+        command.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+        command.Parameters.AddWithValue("$memberId", ToDatabaseValue(memberId));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public void Dispose() => _initializationGate.Dispose();
 
     private async Task<ulong?> GetChannelIdAsync(
@@ -338,6 +622,30 @@ public sealed class SqliteGuildChannelConfigurationStore : IGuildChannelConfigur
                 EventChannelId TEXT NULL,
                 EventBackgroundObjectKey TEXT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS GuildWarningSettings (
+                GuildId TEXT NOT NULL PRIMARY KEY,
+                TimeoutThreshold INTEGER NOT NULL,
+                TimeoutMinutes INTEGER NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS WarningEscalationApplications (
+                GuildId TEXT NOT NULL,
+                MemberId TEXT NOT NULL,
+                PRIMARY KEY (GuildId, MemberId)
+            );
+
+            CREATE TABLE IF NOT EXISTS MemberWarnings (
+                WarningId INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+                GuildId TEXT NOT NULL,
+                MemberId TEXT NOT NULL,
+                ModeratorId TEXT NOT NULL,
+                Reason TEXT NOT NULL,
+                CreatedAtUnixSeconds INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS IX_MemberWarnings_Guild_Member
+            ON MemberWarnings (GuildId, MemberId, WarningId DESC);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
         await EnsureColumnAsync(
@@ -435,8 +743,35 @@ public sealed class SqliteGuildChannelConfigurationStore : IGuildChannelConfigur
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    private static async Task ClearWarningEscalationApplicationsAsync(
+        SqliteConnection connection,
+        SqliteTransaction transaction,
+        ulong guildId,
+        CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText = $"""
+            DELETE FROM {WarningEscalationApplicationsTable}
+            WHERE GuildId = $guildId;
+            """;
+        command.Parameters.AddWithValue("$guildId", ToDatabaseValue(guildId));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private static string ToDatabaseValue(ulong value) =>
         value.ToString(CultureInfo.InvariantCulture);
+
+    private static ulong ParseSnowflake(string value, string columnName)
+    {
+        if (ulong.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var snowflake))
+        {
+            return snowflake;
+        }
+
+        throw new InvalidOperationException(
+            $"The {columnName} value in {MemberWarningsTable} is not a valid Discord snowflake.");
+    }
 }
 
 public sealed class DatabaseInitializationService : IHostedService

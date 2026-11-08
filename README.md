@@ -98,6 +98,8 @@ secrets, or your deployment platform's secret-management facility.
 | `/ban` | Ban Members | Bans a member from the server. |
 | `/timeout` | Moderate Members | Prevents a member from communicating for 1 minute to 28 days. |
 | `/untimeout` | Moderate Members | Removes a member timeout. |
+| `/warn` | Moderate Members | Adds a persistent warning to a member. |
+| `/warnings` | Moderate Members | Lists a member's warning history. |
 | `/settings moderation-logs set` | Manage Server | Sets the server audit channel. |
 | `/settings moderation-logs remove` | Manage Server | Removes the server audit channel. |
 | `/settings member-logs set` | Manage Server | Sets the member activity log channel. |
@@ -106,6 +108,8 @@ secrets, or your deployment platform's secret-management facility.
 | `/settings member-events remove` | Manage Server | Removes the member event channel. |
 | `/settings member-events background` | Manage Server | Sets the member event card background image. |
 | `/settings member-events background-reset` | Manage Server | Restores the default card background image. |
+| `/settings warnings set-escalation` | Manage Server | Configures a warning threshold and timeout. |
+| `/settings warnings remove-escalation` | Manage Server | Disables automatic warning timeouts. |
 
 Moderation commands also require the bot to have the corresponding permission.
 Arisu prevents actions against yourself, the server owner, and members whose
@@ -113,6 +117,22 @@ roles are at or above the moderator's or bot's highest role. Moderation
 responses are visible only to the moderator. Timeout notifications are sent by
 direct message when possible; a timeout still applies if a direct message
 cannot be delivered.
+
+## Warnings
+
+Use `/warn` to create a persistent, per-server warning with a required reason.
+Use `/warnings` to see the eight most recent warnings for a member. Warning
+history is retained when automatic escalation is disabled.
+
+To automatically time out members at a warning threshold, use
+`/settings warnings set-escalation`. For example, a threshold of `3` with a
+timeout of `60` applies a one-hour timeout when a member receives their third
+warning. Escalation applies once per member for each configured policy; it
+does not time out the member again for later warnings. Updating or re-enabling
+the policy lets it apply again after a member's next warning. Use
+`/settings warnings remove-escalation` to disable automatic timeouts without
+removing warning history. If Discord cannot apply an escalation timeout, the
+next warning retries the escalation.
 
 ## Server audit channel
 

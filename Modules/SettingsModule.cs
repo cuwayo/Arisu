@@ -1,4 +1,5 @@
 using Arisu.Services;
+using Arisu.Storage;
 using Discord;
 using Discord.Interactions;
 using Discord.WebSocket;
@@ -313,6 +314,99 @@ public sealed class SettingsModule : InteractionModuleBase<SocketInteractionCont
             await WriteSettingsAuditEntryAsync(
                 "Member event channel removed",
                 "The member event channel was removed.");
+        }
+
+        private Task WriteSettingsAuditEntryAsync(string action, string details) =>
+            _auditChannelService.WriteAsync(
+                new ModerationAuditEntry(
+                    Context.Guild.Id,
+                    action,
+                    Context.User.Id,
+                    null,
+                    "Bot settings changed.",
+                    details,
+                    DateTimeOffset.UtcNow));
+    }
+
+    [Group("warnings", "Configure warning escalation.")]
+    public sealed class WarningSettingsModule : InteractionModuleBase<SocketInteractionContext>
+    {
+        private const int MaximumTimeoutMinutes = 28 * 24 * 60;
+
+        private readonly IAuditChannelService _auditChannelService;
+        private readonly IGuildChannelConfigurationStore _configurationStore;
+        private readonly ILogger<WarningSettingsModule> _logger;
+
+        public WarningSettingsModule(
+            IAuditChannelService auditChannelService,
+            IGuildChannelConfigurationStore configurationStore,
+            ILogger<WarningSettingsModule> logger)
+        {
+            _auditChannelService = auditChannelService;
+            _configurationStore = configurationStore;
+            _logger = logger;
+        }
+
+        [SlashCommand("set-escalation", "Set the warning count that automatically applies a timeout.")]
+        [RequireUserPermission(GuildPermission.ManageGuild)]
+        public async Task SetEscalationAsync(
+            [Summary("threshold", "Warnings needed before the timeout is applied.")] int threshold,
+            [Summary("timeout-minutes", "Automatic timeout length, up to 28 days.")] int timeoutMinutes)
+        {
+            if (threshold <= 0)
+            {
+                await RespondAsync(
+                    "The warning threshold must be at least 1.",
+                    ephemeral: true);
+                return;
+            }
+
+            if (timeoutMinutes is <= 0 or > MaximumTimeoutMinutes)
+            {
+                await RespondAsync(
+                    "The escalation timeout must be between 1 minute and 28 days.",
+                    ephemeral: true);
+                return;
+            }
+
+            await _configurationStore.SetWarningEscalationAsync(
+                Context.Guild.Id,
+                new WarningEscalation(threshold, timeoutMinutes));
+
+            _logger.LogInformation(
+                "Moderator {ModeratorId} set warning escalation to {Threshold} warnings and {TimeoutMinutes} minutes in guild {GuildId}.",
+                Context.User.Id,
+                threshold,
+                timeoutMinutes,
+                Context.Guild.Id);
+
+            await RespondAsync(
+                $"Members who receive {threshold} warning(s) will be timed out for {timeoutMinutes} minute(s).",
+                ephemeral: true);
+
+            await WriteSettingsAuditEntryAsync(
+                "Warning escalation configured",
+                $"At {threshold} warning(s), apply a {timeoutMinutes}-minute timeout.");
+        }
+
+        [SlashCommand("remove-escalation", "Stop automatically timing out members for warnings.")]
+        [RequireUserPermission(GuildPermission.ManageGuild)]
+        public async Task RemoveEscalationAsync()
+        {
+            await _configurationStore.RemoveWarningEscalationAsync(Context.Guild.Id);
+
+            _logger.LogInformation(
+                "Moderator {ModeratorId} removed warning escalation in guild {GuildId}.",
+                Context.User.Id,
+                Context.Guild.Id);
+
+            await RespondAsync(
+                "Warning escalation has been disabled. Existing warnings were kept.",
+                ephemeral: true);
+
+            await WriteSettingsAuditEntryAsync(
+                "Warning escalation removed",
+                "Automatic warning timeouts were disabled. Existing warnings were kept.");
         }
 
         private Task WriteSettingsAuditEntryAsync(string action, string details) =>
