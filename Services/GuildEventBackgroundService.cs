@@ -1,4 +1,5 @@
 using Arisu.Storage;
+using Arisu.Utilities;
 using Discord;
 using Microsoft.Extensions.Logging;
 using SkiaSharp;
@@ -25,7 +26,7 @@ public sealed record GuildEventBackgroundUpdateResult(
     bool Succeeded,
     string Message);
 
-public sealed class GuildEventBackgroundService : IGuildEventBackgroundService
+public sealed class GuildEventBackgroundService : IGuildEventBackgroundService, IDisposable
 {
     private const int MaximumImageBytes = 8 * 1024 * 1024;
     private const int MaximumStoredImageBytes = 2 * 1024 * 1024;
@@ -45,6 +46,8 @@ public sealed class GuildEventBackgroundService : IGuildEventBackgroundService
     private readonly HttpClient _httpClient;
     private readonly ILogger<GuildEventBackgroundService> _logger;
     private readonly IObjectStorageAdapter _objectStorage;
+    private readonly SemaphoreSlim[] _updateGates = Enumerable.Range(0, 64)
+        .Select(_ => new SemaphoreSlim(1, 1)).ToArray();
 
     public GuildEventBackgroundService(
         IGuildChannelConfigurationStore channelConfigurationStore,
@@ -93,14 +96,16 @@ public sealed class GuildEventBackgroundService : IGuildEventBackgroundService
                 "The background image has too many pixels. Use an image smaller than 16 megapixels.");
         }
 
-        if (!Uri.TryCreate(attachment.Url, UriKind.Absolute, out var imageUri) ||
-            imageUri.Scheme != Uri.UriSchemeHttps)
+        if (!EndpointValidation.IsDiscordMediaUrl(attachment.Url))
         {
             return new GuildEventBackgroundUpdateResult(
                 false,
                 "The uploaded image does not have a valid HTTPS URL.");
         }
 
+        var imageUri = new Uri(attachment.Url);
+        var updateGate = GetUpdateGate(guildId);
+        await updateGate.WaitAsync(cancellationToken);
         try
         {
             var sourceImage = await DownloadImageAsync(imageUri, cancellationToken);
@@ -167,12 +172,18 @@ public sealed class GuildEventBackgroundService : IGuildEventBackgroundService
                 false,
                 "I could not use that image. Upload a valid image that is 8 MB or smaller.");
         }
+        finally
+        {
+            updateGate.Release();
+        }
     }
 
     public async Task<bool> ResetAsync(
         ulong guildId,
         CancellationToken cancellationToken = default)
     {
+        var updateGate = GetUpdateGate(guildId);
+        await updateGate.WaitAsync(cancellationToken);
         try
         {
             var objectKey = await _channelConfigurationStore.GetEventBackgroundObjectKeyAsync(
@@ -198,6 +209,10 @@ public sealed class GuildEventBackgroundService : IGuildEventBackgroundService
 
             return true;
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception exception)
         {
             _logger.LogError(
@@ -205,6 +220,10 @@ public sealed class GuildEventBackgroundService : IGuildEventBackgroundService
                 "Could not reset member event background image for guild {GuildId}.",
                 guildId);
             return false;
+        }
+        finally
+        {
+            updateGate.Release();
         }
     }
 
@@ -227,14 +246,16 @@ public sealed class GuildEventBackgroundService : IGuildEventBackgroundService
                 return null;
             }
 
-            var image = await _objectStorage.DownloadAsync(objectKey, cancellationToken);
-            if (image.Length > MaximumStoredImageBytes)
-            {
-                throw new InvalidDataException(
-                    $"Custom member event background {objectKey} is larger than {MaximumStoredImageBytes} bytes.");
-            }
+            var image = await _objectStorage.DownloadAsync(
+                objectKey,
+                cancellationToken,
+                MaximumStoredImageBytes);
 
             return image;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -263,25 +284,7 @@ public sealed class GuildEventBackgroundService : IGuildEventBackgroundService
         }
 
         await using var source = await response.Content.ReadAsStreamAsync(cancellationToken);
-        await using var destination = new MemoryStream();
-        var buffer = new byte[81_920];
-
-        while (true)
-        {
-            var read = await source.ReadAsync(buffer, cancellationToken);
-            if (read == 0)
-            {
-                return destination.ToArray();
-            }
-
-            if (destination.Length + read > MaximumImageBytes)
-            {
-                throw new InvalidDataException(
-                    $"The uploaded image is larger than {MaximumImageBytes} bytes.");
-            }
-
-            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-        }
+        return await BoundedStreamReader.ReadAsync(source, MaximumImageBytes, cancellationToken);
     }
 
     private async Task DeleteObjectAsync(string objectKey, CancellationToken cancellationToken)
@@ -298,6 +301,17 @@ public sealed class GuildEventBackgroundService : IGuildEventBackgroundService
                 objectKey);
         }
     }
+
+    public void Dispose()
+    {
+        foreach (var gate in _updateGates)
+        {
+            gate.Dispose();
+        }
+    }
+
+    private SemaphoreSlim GetUpdateGate(ulong guildId) =>
+        _updateGates[(int)(guildId % (ulong)_updateGates.Length)];
 
     private static string CreateObjectKey(ulong guildId) =>
         $"member-event-backgrounds/{guildId}/{Guid.NewGuid():N}.png";

@@ -11,7 +11,7 @@ public interface IAuditChannelService
 
     Task<bool> RemoveAuditChannelAsync(ulong guildId);
 
-    Task WriteAsync(ModerationAuditEntry entry);
+    Task WriteAsync(ModerationAuditEntry entry, CancellationToken cancellationToken = default);
 }
 
 public sealed record ModerationAuditEntry(
@@ -28,14 +28,17 @@ public sealed class AuditChannelService : IAuditChannelService
     private readonly DiscordSocketClient _client;
     private readonly ILogger<AuditChannelService> _logger;
     private readonly IGuildChannelConfigurationStore _channelConfigurationStore;
+    private readonly LogChannelCache _cache;
 
     public AuditChannelService(
         DiscordSocketClient client,
         IGuildChannelConfigurationStore channelConfigurationStore,
+        LogChannelCache cache,
         ILogger<AuditChannelService> logger)
     {
         _client = client;
         _channelConfigurationStore = channelConfigurationStore;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -43,7 +46,12 @@ public sealed class AuditChannelService : IAuditChannelService
     {
         try
         {
-            await _channelConfigurationStore.SetAuditChannelIdAsync(guildId, channelId);
+            await LogChannelConfigurationWriter.WriteAsync(
+                guildId,
+                LogChannelKind.Audit,
+                channelId,
+                _cache,
+                () => _channelConfigurationStore.SetAuditChannelIdAsync(guildId, channelId));
             return true;
         }
         catch (Exception exception)
@@ -57,16 +65,23 @@ public sealed class AuditChannelService : IAuditChannelService
         }
     }
 
-    public async Task WriteAsync(ModerationAuditEntry entry)
+    public async Task WriteAsync(
+        ModerationAuditEntry entry,
+        CancellationToken cancellationToken = default)
     {
-        await WriteAsync(entry.GuildId, BuildEmbed(entry));
+        await WriteAsync(entry.GuildId, BuildEmbed(entry), cancellationToken);
     }
 
     public async Task<bool> RemoveAuditChannelAsync(ulong guildId)
     {
         try
         {
-            await _channelConfigurationStore.RemoveAuditChannelIdAsync(guildId);
+            await LogChannelConfigurationWriter.WriteAsync(
+                guildId,
+                LogChannelKind.Audit,
+                null,
+                _cache,
+                () => _channelConfigurationStore.RemoveAuditChannelIdAsync(guildId));
             return true;
         }
         catch (Exception exception)
@@ -79,9 +94,14 @@ public sealed class AuditChannelService : IAuditChannelService
         }
     }
 
-    private async Task WriteAsync(ulong guildId, Embed embed)
+    private async Task WriteAsync(ulong guildId, Embed embed, CancellationToken cancellationToken)
     {
-        var channelId = await GetAuditChannelIdAsync(guildId);
+        cancellationToken.ThrowIfCancellationRequested();
+        var channelId = await _cache.GetAsync(
+            guildId,
+            LogChannelKind.Audit,
+            token => _channelConfigurationStore.GetAuditChannelIdAsync(guildId, token),
+            cancellationToken);
         if (channelId is null)
         {
             return;
@@ -100,7 +120,12 @@ public sealed class AuditChannelService : IAuditChannelService
         {
             await channel.SendMessageAsync(
                 embed: embed,
-                allowedMentions: AllowedMentions.None);
+                allowedMentions: AllowedMentions.None,
+                options: new RequestOptions { CancelToken = cancellationToken });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -109,22 +134,6 @@ public sealed class AuditChannelService : IAuditChannelService
                 "Could not write audit entry to channel {ChannelId} in guild {GuildId}.",
                 channelId,
                 guildId);
-        }
-    }
-
-    private async Task<ulong?> GetAuditChannelIdAsync(ulong guildId)
-    {
-        try
-        {
-            return await _channelConfigurationStore.GetAuditChannelIdAsync(guildId);
-        }
-        catch (Exception exception)
-        {
-            _logger.LogError(
-                exception,
-                "Could not load the audit channel for guild {GuildId}.",
-                guildId);
-            return null;
         }
     }
 

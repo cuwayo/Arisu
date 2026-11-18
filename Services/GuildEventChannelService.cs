@@ -11,7 +11,9 @@ public interface IGuildEventChannelService
 
     Task<bool> RemoveEventChannelAsync(ulong guildId);
 
-    Task PublishAsync(GuildEventNotification notification);
+    Task PublishAsync(
+        GuildEventNotification notification,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed record GuildEventNotification(
@@ -63,9 +65,12 @@ public sealed class GuildEventChannelService : IGuildEventChannelService
         }
     }
 
-    public async Task PublishAsync(GuildEventNotification notification)
+    public async Task PublishAsync(
+        GuildEventNotification notification,
+        CancellationToken cancellationToken = default)
     {
-        var channelId = await GetEventChannelIdAsync(notification.GuildId);
+        cancellationToken.ThrowIfCancellationRequested();
+        var channelId = await GetEventChannelIdAsync(notification.GuildId, cancellationToken);
         if (channelId is null)
         {
             _logger.LogWarning(
@@ -87,12 +92,17 @@ public sealed class GuildEventChannelService : IGuildEventChannelService
 
         try
         {
-            await using var card = await _eventCardService.CreateAsync(notification);
-            await ArchiveCardAsync(card, notification);
+            await using var card = await _eventCardService.CreateAsync(notification, cancellationToken);
+            await ArchiveCardAsync(card, notification, cancellationToken);
             await channel.SendFileAsync(
                 card,
                 "member-event.png",
-                allowedMentions: AllowedMentions.None);
+                allowedMentions: AllowedMentions.None,
+                options: new RequestOptions { CancelToken = cancellationToken });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -102,7 +112,7 @@ public sealed class GuildEventChannelService : IGuildEventChannelService
                 channelId,
                 notification.GuildId);
 
-            await PublishFallbackAsync(channel, notification, channelId.Value);
+            await PublishFallbackAsync(channel, notification, channelId.Value, cancellationToken);
         }
     }
 
@@ -123,11 +133,17 @@ public sealed class GuildEventChannelService : IGuildEventChannelService
         }
     }
 
-    private async Task<ulong?> GetEventChannelIdAsync(ulong guildId)
+    private async Task<ulong?> GetEventChannelIdAsync(
+        ulong guildId,
+        CancellationToken cancellationToken)
     {
         try
         {
-            return await _channelConfigurationStore.GetEventChannelIdAsync(guildId);
+            return await _channelConfigurationStore.GetEventChannelIdAsync(guildId, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -141,7 +157,8 @@ public sealed class GuildEventChannelService : IGuildEventChannelService
 
     private async Task ArchiveCardAsync(
         Stream card,
-        GuildEventNotification notification)
+        GuildEventNotification notification,
+        CancellationToken cancellationToken)
     {
         var timestamp = notification.OccurredAt.UtcDateTime;
         var objectKey =
@@ -150,7 +167,11 @@ public sealed class GuildEventChannelService : IGuildEventChannelService
 
         try
         {
-            await _objectStorage.UploadAsync(objectKey, card, "image/png");
+            await _objectStorage.UploadAsync(objectKey, card, "image/png", cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -181,13 +202,20 @@ public sealed class GuildEventChannelService : IGuildEventChannelService
     private async Task PublishFallbackAsync(
         ITextChannel channel,
         GuildEventNotification notification,
-        ulong channelId)
+        ulong channelId,
+        CancellationToken cancellationToken)
     {
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             await channel.SendMessageAsync(
                 embed: BuildEmbed(notification),
-                allowedMentions: AllowedMentions.None);
+                allowedMentions: AllowedMentions.None,
+                options: new RequestOptions { CancelToken = cancellationToken });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {

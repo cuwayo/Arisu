@@ -10,6 +10,8 @@ injection.
 - `Configuration/` contains strongly typed options bound from configuration.
 - `Services/` owns Discord gateway lifecycle and interaction dispatch.
 - `Modules/` contains Discord.Net interaction modules; add slash commands here.
+- `Storage/` contains PostgreSQL persistence and object-storage adapters.
+- `tests/Arisu.IntegrationTests/` tests persistence against real PostgreSQL.
 - `appsettings.json` holds non-secret defaults. Build output is generated in
   `bin/` and `obj/`; do not edit or commit generated files.
 
@@ -25,7 +27,8 @@ dotnet restore
 dotnet build
 dotnet format --verify-no-changes
 Discord__Token='your-bot-token' \
-  Discord__DevelopmentGuildId='your-guild-id' dotnet run
+  Discord__DevelopmentGuildId='your-guild-id' \
+  Database__ConnectionString='your-postgresql-connection-string' dotnet run
 ```
 
 `restore` fetches packages, `build` compiles the bot, and the format check
@@ -51,10 +54,13 @@ whitespace.
 
 ## Testing and Manual Verification
 
-There is currently no test project or coverage target. Before submitting a
-change, run `dotnet build` and exercise affected commands in a development
-guild. Add focused automated tests in a future `tests/` project when behavior
-can be isolated; name test methods after the behavior being verified.
+Before submitting a change, run `dotnet build`, the format check, and affected
+integration tests. Set `ARISU_TEST_DATABASE_CONNECTION_STRING` to a disposable
+PostgreSQL database, then run
+`dotnet test tests/Arisu.IntegrationTests/Arisu.IntegrationTests.csproj`. Tests
+create and drop isolated schemas; use a separate test database and role. Name
+test methods after the behavior being verified. Exercise affected commands in
+a development guild.
 
 ## Configuration, Commits, and Pull Requests
 

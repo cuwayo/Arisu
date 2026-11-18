@@ -13,16 +13,19 @@ public sealed class ModerationAuditLogService : IHostedService
     private readonly IAuditChannelService _auditChannelService;
     private readonly DiscordSocketClient _client;
     private readonly ILogger<ModerationAuditLogService> _logger;
+    private readonly GatewayLogQueue _logQueue;
     private bool _started;
 
     public ModerationAuditLogService(
         IAuditChannelService auditChannelService,
         DiscordSocketClient client,
-        ILogger<ModerationAuditLogService> logger)
+        ILogger<ModerationAuditLogService> logger,
+        GatewayLogQueue logQueue)
     {
         _auditChannelService = auditChannelService;
         _client = client;
         _logger = logger;
+        _logQueue = logQueue;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -49,12 +52,19 @@ public sealed class ModerationAuditLogService : IHostedService
         return Task.CompletedTask;
     }
 
-    private async Task HandleAuditLogCreatedAsync(
+    private Task HandleAuditLogCreatedAsync(SocketAuditLogEntry auditLogEntry, SocketGuild guild)
+    {
+        _logQueue.TryEnqueue(token => PublishAuditLogAsync(auditLogEntry, guild, token));
+        return Task.CompletedTask;
+    }
+
+    private async Task PublishAuditLogAsync(
         SocketAuditLogEntry auditLogEntry,
-        SocketGuild guild)
+        SocketGuild guild,
+        CancellationToken cancellationToken)
     {
         var actorId = auditLogEntry.User?.Id
-            ?? await ResolveActorIdAsync(auditLogEntry, guild);
+            ?? await ResolveActorIdAsync(auditLogEntry, guild, cancellationToken);
         var moderationEntry = CreateAuditEntry(auditLogEntry, guild.Id, actorId);
 
         _logger.LogInformation(
@@ -63,7 +73,7 @@ public sealed class ModerationAuditLogService : IHostedService
             moderationEntry.Target ?? "unknown",
             moderationEntry.GuildId);
 
-        await _auditChannelService.WriteAsync(moderationEntry);
+        await _auditChannelService.WriteAsync(moderationEntry, cancellationToken);
     }
 
     private static ModerationAuditEntry CreateAuditEntry(
@@ -106,19 +116,25 @@ public sealed class ModerationAuditLogService : IHostedService
 
     private async Task<ulong?> ResolveActorIdAsync(
         SocketAuditLogEntry auditLogEntry,
-        SocketGuild guild)
+        SocketGuild guild,
+        CancellationToken cancellationToken)
     {
         try
         {
             await foreach (var entries in guild.GetAuditLogsAsync(
                                AuditLogActorLookupLimit,
-                               beforeId: auditLogEntry.Id + 1))
+                               beforeId: auditLogEntry.Id + 1,
+                               options: new RequestOptions { CancelToken = cancellationToken }))
             {
                 return entries
                     .FirstOrDefault(entry => entry.Id == auditLogEntry.Id)
                     ?.User
                     ?.Id;
             }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {

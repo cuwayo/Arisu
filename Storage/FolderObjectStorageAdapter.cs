@@ -1,4 +1,5 @@
 using Arisu.Configuration;
+using Arisu.Utilities;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
@@ -58,6 +59,7 @@ public sealed class FolderObjectStorageAdapter : IObjectStorageAdapter, IDisposa
             $".{Path.GetFileName(objectPath)}.{Guid.NewGuid():N}.tmp");
 
         Directory.CreateDirectory(directoryPath);
+        EnsureNoReparsePoints(temporaryPath);
 
         try
         {
@@ -90,10 +92,20 @@ public sealed class FolderObjectStorageAdapter : IObjectStorageAdapter, IDisposa
 
     public async Task<byte[]> DownloadAsync(
         string objectKey,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int maximumBytes = 2 * 1024 * 1024)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumBytes);
+
         var objectPath = GetObjectPath(objectKey);
-        var content = await File.ReadAllBytesAsync(objectPath, cancellationToken);
+        await using var source = new FileStream(
+            objectPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.Read,
+            bufferSize: 81_920,
+            useAsync: true);
+        var content = await BoundedStreamReader.ReadAsync(source, maximumBytes, cancellationToken);
 
         _logger.LogDebug(
             "Read object {ObjectKey} from local folder {FolderPath}.",
@@ -135,6 +147,7 @@ public sealed class FolderObjectStorageAdapter : IObjectStorageAdapter, IDisposa
         try
         {
             var archivePath = Path.Combine(_rootPath, EventCardArchiveDirectoryName);
+            EnsureNoReparsePoints(archivePath);
             if (!Directory.Exists(archivePath))
             {
                 return;
@@ -148,10 +161,16 @@ public sealed class FolderObjectStorageAdapter : IObjectStorageAdapter, IDisposa
             foreach (var filePath in Directory.EnumerateFiles(
                          archivePath,
                          "*.png",
-                         SearchOption.AllDirectories))
+                         new EnumerationOptions
+                         {
+                             RecurseSubdirectories = true,
+                             AttributesToSkip = FileAttributes.ReparsePoint,
+                             IgnoreInaccessible = false
+                         }))
             {
                 cancellationToken.ThrowIfCancellationRequested();
 
+                EnsureNoReparsePoints(filePath);
                 if (File.GetLastWriteTimeUtc(filePath) >= cutoff)
                 {
                     continue;
@@ -197,7 +216,8 @@ public sealed class FolderObjectStorageAdapter : IObjectStorageAdapter, IDisposa
         var objectPath = Path.GetFullPath(Path.Combine(_rootPath, normalizedKey));
         var relativePath = Path.GetRelativePath(_rootPath, objectPath);
 
-        if (relativePath.Equals("..", StringComparison.Ordinal) ||
+        if (relativePath.Equals(".", StringComparison.Ordinal) ||
+            relativePath.Equals("..", StringComparison.Ordinal) ||
             relativePath.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ||
             Path.IsPathRooted(relativePath))
         {
@@ -206,7 +226,41 @@ public sealed class FolderObjectStorageAdapter : IObjectStorageAdapter, IDisposa
                 nameof(objectKey));
         }
 
+        EnsureNoReparsePoints(objectPath);
         return objectPath;
+    }
+
+    private static void EnsureNoReparsePoints(string path)
+    {
+        var filesystemRoot = Path.GetPathRoot(path)
+            ?? throw new IOException("The storage path has no filesystem root.");
+        var relativePath = Path.GetRelativePath(filesystemRoot, path);
+        path = filesystemRoot;
+
+        foreach (var component in relativePath.Split(
+                     Path.DirectorySeparatorChar,
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            path = Path.Combine(path, component);
+            ThrowIfReparsePoint(path);
+        }
+    }
+
+    private static void ThrowIfReparsePoint(string path)
+    {
+        try
+        {
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new IOException($"The storage path contains a reparse point: {path}");
+            }
+        }
+        catch (FileNotFoundException)
+        {
+        }
+        catch (DirectoryNotFoundException)
+        {
+        }
     }
 
     private static bool IsEventCardArchive(string objectKey) =>

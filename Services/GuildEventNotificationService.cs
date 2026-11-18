@@ -9,16 +9,19 @@ public sealed class GuildEventNotificationService : IHostedService
 {
     private readonly IGuildEventChannelService _eventChannelService;
     private readonly DiscordSocketClient _client;
+    private readonly GatewayLogQueue _logQueue;
     private readonly ILogger<GuildEventNotificationService> _logger;
     private bool _started;
 
     public GuildEventNotificationService(
         IGuildEventChannelService eventChannelService,
         DiscordSocketClient client,
+        GatewayLogQueue logQueue,
         ILogger<GuildEventNotificationService> logger)
     {
         _eventChannelService = eventChannelService;
         _client = client;
+        _logQueue = logQueue;
         _logger = logger;
     }
 
@@ -57,15 +60,17 @@ public sealed class GuildEventNotificationService : IHostedService
             member.Id,
             member.Guild.Id);
 
-        return _eventChannelService.PublishAsync(
-            new GuildEventNotification(
-                member.Guild.Id,
-                "Member joined",
-                member.Id,
-                GetMemberName(member),
-                member.GetDisplayAvatarUrl(ImageFormat.Png, 256),
-                $"Welcome to {member.Guild.Name}.",
-                DateTimeOffset.UtcNow));
+        var notification = new GuildEventNotification(
+            member.Guild.Id,
+            "Member joined",
+            member.Id,
+            GetMemberName(member),
+            member.GetDisplayAvatarUrl(ImageFormat.Png, 256),
+            $"Welcome to {member.Guild.Name}.",
+            DateTimeOffset.UtcNow);
+        _logQueue.TryEnqueue(cancellationToken =>
+            _eventChannelService.PublishAsync(notification, cancellationToken));
+        return Task.CompletedTask;
     }
 
     private Task HandleUserLeftAsync(SocketGuild guild, SocketUser user)
@@ -75,15 +80,17 @@ public sealed class GuildEventNotificationService : IHostedService
             user.Id,
             guild.Id);
 
-        return _eventChannelService.PublishAsync(
-            new GuildEventNotification(
-                guild.Id,
-                "Member left",
-                user.Id,
-                GetMemberName(user),
-                user.GetDisplayAvatarUrl(ImageFormat.Png, 256),
-                $"Goodbye from {guild.Name}.",
-                DateTimeOffset.UtcNow));
+        var notification = new GuildEventNotification(
+            guild.Id,
+            "Member left",
+            user.Id,
+            GetMemberName(user),
+            user.GetDisplayAvatarUrl(ImageFormat.Png, 256),
+            $"Goodbye from {guild.Name}.",
+            DateTimeOffset.UtcNow);
+        _logQueue.TryEnqueue(cancellationToken =>
+            _eventChannelService.PublishAsync(notification, cancellationToken));
+        return Task.CompletedTask;
     }
 
     private Task HandleGuildMemberUpdatedAsync(
@@ -102,15 +109,17 @@ public sealed class GuildEventNotificationService : IHostedService
             after.Id,
             after.Guild.Id);
 
-        return _eventChannelService.PublishAsync(
-            new GuildEventNotification(
-                after.Guild.Id,
-                "Server boost",
-                after.Id,
-                GetMemberName(after),
-                after.GetDisplayAvatarUrl(ImageFormat.Png, 256),
-                $"Thanks for boosting {after.Guild.Name}!",
-                DateTimeOffset.UtcNow));
+        var notification = new GuildEventNotification(
+            after.Guild.Id,
+            "Server boost",
+            after.Id,
+            GetMemberName(after),
+            after.GetDisplayAvatarUrl(ImageFormat.Png, 256),
+            $"Thanks for boosting {after.Guild.Name}!",
+            DateTimeOffset.UtcNow);
+        _logQueue.TryEnqueue(cancellationToken =>
+            _eventChannelService.PublishAsync(notification, cancellationToken));
+        return Task.CompletedTask;
     }
 
     private static string GetMemberName(IUser user) =>

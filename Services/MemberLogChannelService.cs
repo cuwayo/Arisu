@@ -11,7 +11,7 @@ public interface IMemberLogChannelService
 
     Task<bool> RemoveMemberLogChannelAsync(ulong guildId);
 
-    Task PublishAsync(MemberLogEntry entry);
+    Task PublishAsync(MemberLogEntry entry, CancellationToken cancellationToken = default);
 }
 
 public sealed record MemberLogEntry(
@@ -27,14 +27,17 @@ public sealed class MemberLogChannelService : IMemberLogChannelService
     private readonly DiscordSocketClient _client;
     private readonly IGuildChannelConfigurationStore _channelConfigurationStore;
     private readonly ILogger<MemberLogChannelService> _logger;
+    private readonly LogChannelCache _cache;
 
     public MemberLogChannelService(
         DiscordSocketClient client,
         IGuildChannelConfigurationStore channelConfigurationStore,
+        LogChannelCache cache,
         ILogger<MemberLogChannelService> logger)
     {
         _client = client;
         _channelConfigurationStore = channelConfigurationStore;
+        _cache = cache;
         _logger = logger;
     }
 
@@ -42,7 +45,12 @@ public sealed class MemberLogChannelService : IMemberLogChannelService
     {
         try
         {
-            await _channelConfigurationStore.SetMemberLogChannelIdAsync(guildId, channelId);
+            await LogChannelConfigurationWriter.WriteAsync(
+                guildId,
+                LogChannelKind.Member,
+                channelId,
+                _cache,
+                () => _channelConfigurationStore.SetMemberLogChannelIdAsync(guildId, channelId));
             return true;
         }
         catch (Exception exception)
@@ -60,7 +68,12 @@ public sealed class MemberLogChannelService : IMemberLogChannelService
     {
         try
         {
-            await _channelConfigurationStore.RemoveMemberLogChannelIdAsync(guildId);
+            await LogChannelConfigurationWriter.WriteAsync(
+                guildId,
+                LogChannelKind.Member,
+                null,
+                _cache,
+                () => _channelConfigurationStore.RemoveMemberLogChannelIdAsync(guildId));
             return true;
         }
         catch (Exception exception)
@@ -73,9 +86,16 @@ public sealed class MemberLogChannelService : IMemberLogChannelService
         }
     }
 
-    public async Task PublishAsync(MemberLogEntry entry)
+    public async Task PublishAsync(
+        MemberLogEntry entry,
+        CancellationToken cancellationToken = default)
     {
-        var channelId = await GetMemberLogChannelIdAsync(entry.GuildId);
+        cancellationToken.ThrowIfCancellationRequested();
+        var channelId = await _cache.GetAsync(
+            entry.GuildId,
+            LogChannelKind.Member,
+            token => _channelConfigurationStore.GetMemberLogChannelIdAsync(entry.GuildId, token),
+            cancellationToken);
         if (channelId is null)
         {
             return;
@@ -94,7 +114,12 @@ public sealed class MemberLogChannelService : IMemberLogChannelService
         {
             await channel.SendMessageAsync(
                 embed: BuildEmbed(entry),
-                allowedMentions: AllowedMentions.None);
+                allowedMentions: AllowedMentions.None,
+                options: new RequestOptions { CancelToken = cancellationToken });
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -103,22 +128,6 @@ public sealed class MemberLogChannelService : IMemberLogChannelService
                 "Could not write member log entry to channel {ChannelId} in guild {GuildId}.",
                 channelId,
                 entry.GuildId);
-        }
-    }
-
-    private async Task<ulong?> GetMemberLogChannelIdAsync(ulong guildId)
-    {
-        try
-        {
-            return await _channelConfigurationStore.GetMemberLogChannelIdAsync(guildId);
-        }
-        catch (Exception exception)
-        {
-            _logger.LogError(
-                exception,
-                "Could not load the member log channel for guild {GuildId}.",
-                guildId);
-            return null;
         }
     }
 

@@ -13,16 +13,19 @@ public sealed class MemberLogService : IHostedService
     private readonly DiscordSocketClient _client;
     private readonly IMemberLogChannelService _memberLogChannelService;
     private readonly ILogger<MemberLogService> _logger;
+    private readonly GatewayLogQueue _logQueue;
     private bool _started;
 
     public MemberLogService(
         DiscordSocketClient client,
         IMemberLogChannelService memberLogChannelService,
-        ILogger<MemberLogService> logger)
+        ILogger<MemberLogService> logger,
+        GatewayLogQueue logQueue)
     {
         _client = client;
         _memberLogChannelService = memberLogChannelService;
         _logger = logger;
+        _logQueue = logQueue;
     }
 
     public Task StartAsync(CancellationToken cancellationToken)
@@ -70,7 +73,7 @@ public sealed class MemberLogService : IHostedService
             member.Id,
             member.Guild.Id);
 
-        return _memberLogChannelService.PublishAsync(
+        return EnqueueAsync(
             new MemberLogEntry(
                 member.Guild.Id,
                 "Member joined",
@@ -87,7 +90,7 @@ public sealed class MemberLogService : IHostedService
             user.Id,
             guild.Id);
 
-        return _memberLogChannelService.PublishAsync(
+        return EnqueueAsync(
             new MemberLogEntry(
                 guild.Id,
                 "Member left",
@@ -114,7 +117,7 @@ public sealed class MemberLogService : IHostedService
             entry.Event,
             member.Guild.Id);
 
-        return _memberLogChannelService.PublishAsync(entry);
+        return EnqueueAsync(entry);
     }
 
     private Task HandleMessageDeletedAsync(
@@ -133,7 +136,7 @@ public sealed class MemberLogService : IHostedService
             cachedMessage.Id,
             guild.Id);
 
-        return _memberLogChannelService.PublishAsync(entry);
+        return EnqueueAsync(entry);
     }
 
     private Task HandleMessagesBulkDeletedAsync(
@@ -161,7 +164,7 @@ public sealed class MemberLogService : IHostedService
             cachedMessages.Count,
             guild.Id);
 
-        return _memberLogChannelService.PublishAsync(entry);
+        return EnqueueAsync(entry);
     }
 
     private Task HandleMessageUpdatedAsync(
@@ -182,7 +185,7 @@ public sealed class MemberLogService : IHostedService
             after.Id,
             guild.Id);
 
-        return _memberLogChannelService.PublishAsync(entry);
+        return EnqueueAsync(entry);
     }
 
     private Task HandleUserUpdatedAsync(SocketUser before, SocketUser after)
@@ -197,7 +200,7 @@ public sealed class MemberLogService : IHostedService
             member.Id,
             member.Guild.Id);
 
-        return _memberLogChannelService.PublishAsync(
+        return EnqueueAsync(
             new MemberLogEntry(
                 member.Guild.Id,
                 "Avatar changed",
@@ -221,7 +224,7 @@ public sealed class MemberLogService : IHostedService
             after.Id,
             after.Guild.Id);
 
-        return _memberLogChannelService.PublishAsync(
+        return EnqueueAsync(
             new MemberLogEntry(
                 after.Guild.Id,
                 "Server avatar changed",
@@ -229,6 +232,12 @@ public sealed class MemberLogService : IHostedService
                 "The member changed their server-specific avatar.",
                 after.GetDisplayAvatarUrl(ImageFormat.Png, 256),
                 DateTimeOffset.UtcNow));
+    }
+
+    private Task EnqueueAsync(MemberLogEntry entry)
+    {
+        _logQueue.TryEnqueue(token => _memberLogChannelService.PublishAsync(entry, token));
+        return Task.CompletedTask;
     }
 
     private static bool TryGetGuild(ISocketMessageChannel channel, out SocketGuild guild)

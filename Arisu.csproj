@@ -13,18 +13,24 @@
     <PackageReference Include="Discord.Net" Version="3.20.2" />
     <PackageReference Include="AWSSDK.S3" Version="4.0.104.11" />
     <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.0" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.14" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.0" />
+    <PackageReference Include="Npgsql" Version="10.0.3" />
     <PackageReference Include="SkiaSharp" Version="3.119.2" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux" Version="3.119.2" />
   </ItemGroup>
 
   <ItemGroup>
+    <Compile Remove="tests/**/*.cs" />
+    <EmbeddedResource Remove="tests/**" />
+    <None Remove="tests/**" />
+  </ItemGroup>
+
+  <ItemGroup>
     <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
-    <None Update="Assets/Fonts/MochiyPopOne-Regular.ttf"
-          CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Assets/Fonts/MochiyPopOne-Regular.ttf" CopyToOutputDirectory="PreserveNewest" />
     <None Update="Assets/Fonts/OFL.txt" CopyToOutputDirectory="PreserveNewest" />
-    <None Update="Assets/Images/member-event-background.png"
-          CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Assets/Images/member-event-background.png" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="Workflows/MossImageTextToImage.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

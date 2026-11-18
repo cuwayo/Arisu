@@ -3,6 +3,7 @@ using Amazon.Runtime;
 using Amazon.S3;
 using Amazon.S3.Model;
 using Arisu.Configuration;
+using Arisu.Utilities;
 using Microsoft.Extensions.Logging;
 
 namespace Arisu.Storage;
@@ -21,7 +22,8 @@ public interface IObjectStorageAdapter
 
     Task<byte[]> DownloadAsync(
         string objectKey,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        int maximumBytes = 2 * 1024 * 1024);
 
     Task DeleteAsync(
         string objectKey,
@@ -102,9 +104,11 @@ public sealed class S3ObjectStorageAdapter : IObjectStorageAdapter, IDisposable
 
     public async Task<byte[]> DownloadAsync(
         string objectKey,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int maximumBytes = 2 * 1024 * 1024)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(objectKey);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maximumBytes);
 
         using var response = await _client.GetObjectAsync(
             new GetObjectRequest
@@ -114,15 +118,21 @@ public sealed class S3ObjectStorageAdapter : IObjectStorageAdapter, IDisposable
             },
             cancellationToken);
         await using var source = response.ResponseStream;
-        await using var destination = new MemoryStream();
-        await source.CopyToAsync(destination, cancellationToken);
+
+        if (response.ContentLength > maximumBytes)
+        {
+            throw new InvalidDataException(
+                $"The object exceeds the maximum allowed size of {maximumBytes} bytes.");
+        }
+
+        var content = await BoundedStreamReader.ReadAsync(source, maximumBytes, cancellationToken);
 
         _logger.LogDebug(
             "Downloaded object {ObjectKey} from S3 bucket {BucketName}.",
             objectKey,
             _bucketName);
 
-        return destination.ToArray();
+        return content;
     }
 
     public async Task DeleteAsync(

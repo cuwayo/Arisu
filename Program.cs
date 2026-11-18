@@ -7,6 +7,8 @@ using Discord.WebSocket;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Npgsql;
+using Arisu.Utilities;
 
 var builder = Host.CreateApplicationBuilder(args);
 
@@ -26,11 +28,46 @@ builder.Services
     .ValidateOnStart();
 
 builder.Services
+    .AddOptions<ComfyUiOptions>()
+    .Bind(builder.Configuration.GetSection(ComfyUiOptions.SectionName))
+    .Validate(
+        options => !options.Enabled || EndpointValidation.IsSecureServiceEndpoint(options.Endpoint),
+        $"{ComfyUiOptions.SectionName}:Endpoint must be an HTTPS URI (or loopback HTTP URI) without user info or a fragment when image generation is enabled.")
+    .Validate(
+        options => !options.Enabled || !string.IsNullOrWhiteSpace(options.Token),
+        $"{ComfyUiOptions.SectionName}:Token must be supplied when image generation is enabled.")
+    .Validate(
+        options => !options.Enabled || !string.IsNullOrWhiteSpace(options.WorkflowPath),
+        $"{ComfyUiOptions.SectionName}:WorkflowPath must be supplied when image generation is enabled.")
+    .Validate(
+        options => !options.Enabled || !string.IsNullOrWhiteSpace(options.PromptNodeId),
+        $"{ComfyUiOptions.SectionName}:PromptNodeId must be supplied when image generation is enabled.")
+    .Validate(
+        options => !options.Enabled || !string.IsNullOrWhiteSpace(options.PromptInputName),
+        $"{ComfyUiOptions.SectionName}:PromptInputName must be supplied when image generation is enabled.")
+    .Validate(
+        options => !options.Enabled || !string.IsNullOrWhiteSpace(options.NegativePromptNodeId),
+        $"{ComfyUiOptions.SectionName}:NegativePromptNodeId must be supplied when image generation is enabled.")
+    .Validate(
+        options => !options.Enabled || !string.IsNullOrWhiteSpace(options.NegativePromptInputName),
+        $"{ComfyUiOptions.SectionName}:NegativePromptInputName must be supplied when image generation is enabled.")
+    .Validate(
+        options => options.TimeoutSeconds is >= 1 and <= 840,
+        $"{ComfyUiOptions.SectionName}:TimeoutSeconds must be between 1 and 840.")
+    .Validate(
+        options => options.MaximumConcurrentRequests >= 1,
+        $"{ComfyUiOptions.SectionName}:MaximumConcurrentRequests must be at least 1.")
+    .Validate(
+        options => options.UserCooldownSeconds >= 1,
+        $"{ComfyUiOptions.SectionName}:UserCooldownSeconds must be at least 1.")
+    .ValidateOnStart();
+
+builder.Services
     .AddOptions<DatabaseOptions>()
     .Bind(builder.Configuration.GetSection(DatabaseOptions.SectionName))
     .Validate(
-        options => !string.IsNullOrWhiteSpace(options.Path),
-        $"{DatabaseOptions.SectionName}:Path must be supplied.")
+        options => DatabaseOptions.IsValidConnectionString(options.ConnectionString),
+        $"{DatabaseOptions.SectionName}:ConnectionString must specify a PostgreSQL host, database, and username with finite timeouts and sensitive diagnostic logging disabled.")
     .ValidateOnStart();
 
 builder.Services
@@ -56,8 +93,8 @@ builder.Services
     .Validate(
         options => !options.Enabled ||
                    string.IsNullOrWhiteSpace(options.ServiceUrl) ||
-                   Uri.TryCreate(options.ServiceUrl, UriKind.Absolute, out _),
-        $"{ObjectStorageOptions.SectionName}:ServiceUrl must be an absolute URI when supplied.")
+                   EndpointValidation.IsSecureServiceEndpoint(options.ServiceUrl),
+        $"{ObjectStorageOptions.SectionName}:ServiceUrl must be an HTTPS URI (or loopback HTTP URI) without user info or a fragment when supplied.")
     .ValidateOnStart();
 
 builder.Services.AddSingleton(_ =>
@@ -71,9 +108,21 @@ builder.Services.AddSingleton(_ =>
                          GatewayIntents.MessageContent,
         MessageCacheSize = 100
     }));
-builder.Services.AddSingleton(new HttpClient
+builder.Services.AddSingleton(_ => new HttpClient(new SocketsHttpHandler
+{
+    AllowAutoRedirect = false,
+    PooledConnectionLifetime = TimeSpan.FromMinutes(5)
+})
 {
     Timeout = TimeSpan.FromSeconds(10)
+});
+builder.Services.AddHttpClient(ComfyUiImageGenerationService.HttpClientName, client =>
+{
+    client.Timeout = TimeSpan.FromMinutes(15);
+}).ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+{
+    AllowAutoRedirect = false,
+    PooledConnectionLifetime = TimeSpan.FromMinutes(5)
 });
 
 builder.Services.AddSingleton(serviceProvider =>
@@ -84,9 +133,20 @@ builder.Services.AddSingleton(serviceProvider =>
             DefaultRunMode = RunMode.Async
         }));
 
-builder.Services.AddSingleton<SqliteGuildChannelConfigurationStore>();
+builder.Services.AddSingleton(serviceProvider =>
+{
+    var options = serviceProvider.GetRequiredService<
+        Microsoft.Extensions.Options.IOptions<DatabaseOptions>>().Value;
+    return NpgsqlDataSource.Create(options.GetNpgsqlConnectionString());
+});
+builder.Services.AddSingleton<IModerationHistoryStore, PostgresModerationHistoryStore>();
+builder.Services.AddSingleton<IVoiceMasterStore, PostgresVoiceMasterStore>();
+builder.Services.AddSingleton<VoiceMasterService>();
+builder.Services.AddSingleton<IVoiceMasterService>(serviceProvider =>
+    serviceProvider.GetRequiredService<VoiceMasterService>());
+builder.Services.AddSingleton<PostgresGuildChannelConfigurationStore>();
 builder.Services.AddSingleton<IGuildChannelConfigurationStore>(serviceProvider =>
-    serviceProvider.GetRequiredService<SqliteGuildChannelConfigurationStore>());
+    serviceProvider.GetRequiredService<PostgresGuildChannelConfigurationStore>());
 builder.Services.AddSingleton<IObjectStorageAdapter>(serviceProvider =>
 {
     var options = serviceProvider.GetRequiredService<
@@ -102,7 +162,13 @@ builder.Services.AddSingleton<IObjectStorageAdapter>(serviceProvider =>
             serviceProvider.GetRequiredService<ILogger<FolderObjectStorageAdapter>>());
 });
 
+builder.Services.AddSingleton<IChannelLockService, ChannelLockService>();
+builder.Services.AddSingleton<IDiscordAutoModService, DiscordAutoModService>();
+builder.Services.AddSingleton<LogChannelCache>();
+builder.Services.AddSingleton<GatewayLogQueue>();
 builder.Services.AddSingleton<IAuditChannelService, AuditChannelService>();
+builder.Services.AddSingleton<IImageGenerationService, ComfyUiImageGenerationService>();
+builder.Services.AddSingleton<IImageGenerationRequestLimiter, ImageGenerationRequestLimiter>();
 builder.Services.AddSingleton<IMemberLogChannelService, MemberLogChannelService>();
 builder.Services.AddSingleton<IGuildEventBackgroundService, GuildEventBackgroundService>();
 builder.Services.AddSingleton<IGuildEventCardService, GuildEventCardService>();
@@ -115,6 +181,9 @@ builder.Services.AddHostedService<InteractionHandler>();
 builder.Services.AddHostedService<GuildEventNotificationService>();
 builder.Services.AddHostedService<ModerationAuditLogService>();
 builder.Services.AddHostedService<MemberLogService>();
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<VoiceMasterService>());
 builder.Services.AddHostedService<DiscordBotHostedService>();
+// Start after the client so shutdown drains accepted logs before Discord logs out.
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<GatewayLogQueue>());
 
 await builder.Build().RunAsync();

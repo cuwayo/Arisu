@@ -1,3 +1,4 @@
+using Arisu.Utilities;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using SkiaSharp;
@@ -84,6 +85,14 @@ public sealed class GuildEventCardService : IGuildEventCardService, IDisposable
     {
         try
         {
+            if (!EndpointValidation.IsDiscordMediaUrl(notification.AvatarUrl))
+            {
+                _logger.LogWarning(
+                    "Avatar URL for member {MemberId} is not a trusted Discord media URL.",
+                    notification.MemberId);
+                return null;
+            }
+
             using var response = await _httpClient.GetAsync(
                 notification.AvatarUrl,
                 HttpCompletionOption.ResponseHeadersRead,
@@ -100,9 +109,16 @@ public sealed class GuildEventCardService : IGuildEventCardService, IDisposable
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            var avatarBytes = await ReadAvatarBytesAsync(stream, cancellationToken);
+            var avatarBytes = await BoundedStreamReader.ReadAsync(
+                stream,
+                MaximumAvatarBytes,
+                cancellationToken);
             return SKImage.FromEncodedData(avatarBytes)
                 ?? throw new InvalidDataException("Discord returned an invalid avatar image.");
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception exception)
         {
@@ -133,33 +149,6 @@ public sealed class GuildEventCardService : IGuildEventCardService, IDisposable
         }
 
         return image;
-    }
-
-    private static async Task<byte[]> ReadAvatarBytesAsync(
-        Stream source,
-        CancellationToken cancellationToken)
-    {
-        var buffer = new byte[81_920];
-        var bytesRead = 0;
-
-        await using var destination = new MemoryStream();
-        while (true)
-        {
-            var read = await source.ReadAsync(buffer, cancellationToken);
-            if (read == 0)
-            {
-                return destination.ToArray();
-            }
-
-            bytesRead += read;
-            if (bytesRead > MaximumAvatarBytes)
-            {
-                throw new InvalidDataException(
-                    $"Discord returned an avatar larger than {MaximumAvatarBytes} bytes.");
-            }
-
-            await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
-        }
     }
 
     public void Dispose()
