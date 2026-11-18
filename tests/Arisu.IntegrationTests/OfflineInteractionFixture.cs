@@ -119,8 +119,9 @@ internal sealed class OfflineInteractionFixture : IDisposable
 
         if (request.Endpoint.Contains("webhooks/", StringComparison.Ordinal))
         {
-            var content = request.Json is null ? "" : JsonDocument.Parse(request.Json).RootElement
-                .GetProperty("content").GetString();
+            using var payload = JsonDocument.Parse(request.Json ?? "{}");
+            var content = payload.RootElement.TryGetProperty("content", out var value)
+                ? value.GetString() ?? string.Empty : string.Empty;
             return JsonResponse(JsonSerializer.Serialize(new
             {
                 id = "500",
@@ -187,8 +188,16 @@ internal sealed class OfflineInteractionFixture : IDisposable
 
         public Task<RestResponse> SendAsync(string method, string endpoint, IReadOnlyDictionary<string, object> multipartParams,
             CancellationToken cancelToken, bool headerOnly = false, string? reason = null,
-            IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null) =>
-            throw new InvalidOperationException("Offline tests do not upload files.");
+            IEnumerable<KeyValuePair<string, IEnumerable<string>>>? requestHeaders = null)
+        {
+            // Discord.Net uses multipart when clearing attachments, even without files to upload.
+            if (multipartParams.Count != 1 || !multipartParams.TryGetValue("payload_json", out var payload))
+            {
+                throw new InvalidOperationException("Offline tests do not upload files.");
+            }
+
+            return Task.FromResult(fixture.Respond(new(method, endpoint, (string)payload)));
+        }
     }
 }
 

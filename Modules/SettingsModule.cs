@@ -1,8 +1,11 @@
+using System.Text;
 using Arisu.Services;
 using Arisu.Storage;
+using Arisu.Utilities;
 using Discord;
 using Discord.Interactions;
 using Discord.WebSocket;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
 namespace Arisu.Modules;
@@ -323,6 +326,304 @@ public sealed class SettingsModule : DeferredInteractionModuleBase
                     "Bot settings changed.",
                     details,
                     DateTimeOffset.UtcNow));
+    }
+
+    [Group("leveling", "Configure message XP, levels, and cosmetic role rewards.")]
+    [RequireUserPermission(GuildPermission.ManageGuild)]
+    public sealed class LevelingSettingsModule : DeferredInteractionModuleBase
+    {
+        private readonly ILevelingStore _levelingStore;
+        private readonly ILogger<LevelingSettingsModule> _logger;
+        private readonly IHostApplicationLifetime _lifetime;
+        private readonly IAuditChannelService _auditChannelService;
+
+        public LevelingSettingsModule(
+            ILevelingStore levelingStore,
+            ILogger<LevelingSettingsModule> logger,
+            IHostApplicationLifetime lifetime,
+            IAuditChannelService auditChannelService)
+        {
+            _levelingStore = levelingStore;
+            _logger = logger;
+            _lifetime = lifetime;
+            _auditChannelService = auditChannelService;
+        }
+
+        [SlashCommand("enable", "Enable message XP and leveling in this server.")]
+        public Task EnableAsync() => SetEnabledAsync(true);
+
+        [SlashCommand("disable", "Disable message XP without deleting progress or settings.")]
+        public Task DisableAsync() => SetEnabledAsync(false);
+
+        [SlashCommand("status", "Show leveling settings, exclusions, and role rewards.")]
+        public async Task StatusAsync()
+        {
+            await DeferAsync(ephemeral: true);
+
+            var settings = await _levelingStore.GetSettingsAsync(
+                Context.Guild.Id, _lifetime.ApplicationStopping);
+            var embed = new EmbedBuilder()
+                .WithTitle("Leveling settings")
+                .WithColor(Color.Blue)
+                .AddField("Message XP", settings.Enabled ? "Enabled" : "Disabled", inline: true)
+                .AddField("XP cooldown", $"{settings.CooldownSeconds} seconds per member", inline: true)
+                .AddField("Excluded channel IDs", FormatList(
+                    settings.ExcludedChannelIds.Order().ToArray(), id => $"`{id}`"))
+                .AddField("Excluded role IDs", FormatList(
+                    settings.ExcludedRoleIds.Order().ToArray(), id => $"`{id}`"))
+                .AddField("Role rewards", FormatList(
+                    settings.Rewards.OrderBy(reward => reward.Level).ToArray(),
+                    reward => $"Level {reward.Level}: role `{reward.RoleId}`"))
+                .WithFooter("Use cosmetic reward roles only. Leveling is for fun, not server permissions.")
+                .Build();
+
+            await ReplyAsync(embed: embed);
+        }
+
+        [SlashCommand("cooldown", "Set the minimum interval between XP awards for each member.")]
+        public async Task CooldownAsync(
+            [Summary("seconds", "Seconds between XP awards, from 15 to 3600.")]
+            [MinValue(15), MaxValue(3600)] int seconds)
+        {
+            await DeferAsync(ephemeral: true);
+            if (seconds is < 15 or > 3600)
+            {
+                await ReplyAsync("The XP cooldown must be between 15 and 3600 seconds.");
+                return;
+            }
+
+            await SaveChangeAsync(
+                token => _levelingStore.SetCooldownAsync(Context.Guild.Id, seconds, token),
+                "cooldown", seconds.ToString(),
+                $"Members can earn message XP once every {seconds} seconds.");
+        }
+
+        [SlashCommand("exclude-channel", "Stop awarding message XP in a text channel.")]
+        public Task ExcludeChannelAsync(
+            [Summary("channel", "The server text channel to exclude from message XP.")]
+            ITextChannel channel) => SetChannelExcludedAsync(channel, true);
+
+        [SlashCommand("include-channel", "Remove a text channel from the message XP exclusions.")]
+        public Task IncludeChannelAsync(
+            [Summary("channel", "The server text channel to remove from exclusions.")]
+            ITextChannel channel) => SetChannelExcludedAsync(channel, false);
+
+        [SlashCommand("exclude-role", "Stop awarding message XP to members with a role.")]
+        public Task ExcludeRoleAsync(
+            [Summary("role", "Members with this server role will not earn message XP.")]
+            IRole role) => SetRoleExcludedAsync(role, true);
+
+        [SlashCommand("include-role", "Remove a role from the message XP exclusions.")]
+        public Task IncludeRoleAsync(
+            [Summary("role", "The server role to remove from exclusions.")]
+            IRole role) => SetRoleExcludedAsync(role, false);
+
+        [SlashCommand("reward-add", "Set a cosmetic role reward for reaching a level.")]
+        [RequireUserPermission(GuildPermission.ManageRoles)]
+        public async Task RewardAddAsync(
+            [Summary("level", "The reward level, from 1 to 1000.")]
+            [MinValue(1), MaxValue(1000)] int level,
+            [Summary("role", "A cosmetic server role with no moderation or management permissions.")]
+            IRole role)
+        {
+            await DeferAsync(ephemeral: true);
+            if (!await ValidateLevelAsync(level) || !await ValidateRewardRoleAsync(role))
+            {
+                return;
+            }
+
+            await SaveChangeAsync(
+                token => _levelingStore.SetRewardAsync(Context.Guild.Id, level, role.Id, token),
+                "role reward", $"level {level}: role {role.Id}",
+                $"Level {level} will award <@&{role.Id}>. Use cosmetic reward roles only; " +
+                "leveling is for fun, not server permissions.");
+        }
+
+        [SlashCommand("reward-remove", "Remove the role reward configured for a level.")]
+        public async Task RewardRemoveAsync(
+            [Summary("level", "The reward level to remove, from 1 to 1000.")]
+            [MinValue(1), MaxValue(1000)] int level)
+        {
+            await DeferAsync(ephemeral: true);
+            if (!await ValidateLevelAsync(level))
+            {
+                return;
+            }
+
+            await SaveChangeAsync(
+                token => _levelingStore.RemoveRewardAsync(Context.Guild.Id, level, token),
+                "role reward", $"level {level}: removed",
+                $"The role reward for level {level} was removed. Existing member roles were kept.");
+        }
+
+        private async Task SetEnabledAsync(bool enabled)
+        {
+            await DeferAsync(ephemeral: true);
+            await SaveChangeAsync(
+                token => _levelingStore.SetEnabledAsync(Context.Guild.Id, enabled, token),
+                "enabled", enabled.ToString(),
+                enabled ? "Message XP and leveling are enabled." :
+                    "Message XP and leveling are disabled. Existing progress and settings were kept.");
+        }
+
+        private async Task SetChannelExcludedAsync(ITextChannel channel, bool excluded)
+        {
+            await DeferAsync(ephemeral: true);
+            if (channel.GuildId != Context.Guild.Id)
+            {
+                await ReplyAsync("Select a text channel from this server.");
+                return;
+            }
+
+            await SaveChangeAsync(
+                token => _levelingStore.SetChannelExcludedAsync(Context.Guild.Id, channel.Id, excluded, token),
+                "channel exclusion", $"channel {channel.Id}: {excluded}",
+                excluded ? $"Messages in <#{channel.Id}> will not earn XP." :
+                    $"<#{channel.Id}> is no longer excluded from message XP. Role exclusions still apply.");
+        }
+
+        private async Task SetRoleExcludedAsync(IRole role, bool excluded)
+        {
+            await DeferAsync(ephemeral: true);
+            if (role.Guild.Id != Context.Guild.Id)
+            {
+                await ReplyAsync("Select a role from this server.");
+                return;
+            }
+
+            await SaveChangeAsync(
+                token => _levelingStore.SetRoleExcludedAsync(Context.Guild.Id, role.Id, excluded, token),
+                "role exclusion", $"role {role.Id}: {excluded}",
+                excluded ? $"Members with <@&{role.Id}> will not earn message XP." :
+                    $"<@&{role.Id}> is no longer excluded from message XP. Other exclusions still apply.");
+        }
+
+        private async Task<bool> ValidateLevelAsync(int level)
+        {
+            if (level is >= 1 and <= 1000)
+            {
+                return true;
+            }
+
+            await ReplyAsync("The reward level must be between 1 and 1000.");
+            return false;
+        }
+
+        private async Task<bool> ValidateRewardRoleAsync(IRole role)
+        {
+            if (role.Guild.Id != Context.Guild.Id)
+            {
+                await ReplyAsync("Select a role from this server.");
+                return false;
+            }
+
+            if (role.Id == Context.Guild.Id || role.IsManaged)
+            {
+                await ReplyAsync("Reward roles cannot be @everyone or managed by Discord or an integration.");
+                return false;
+            }
+
+            if (!LevelingRewardSafety.IsSafe(role.Permissions) ||
+                Context.Guild.Channels.Any(channel => channel.GetPermissionOverwrite(role) is { } overwrite &&
+                    !LevelingRewardSafety.IsSafe(overwrite)))
+            {
+                await ReplyAsync(
+                    "Use a cosmetic reward role without moderation or server management permissions.");
+                return false;
+            }
+
+            if (Context.User is not SocketGuildUser caller || !caller.GuildPermissions.ManageRoles)
+            {
+                await ReplyAsync("You need Manage Roles to configure leveling role rewards.");
+                return false;
+            }
+
+            var bot = Context.Guild.CurrentUser;
+            if (bot is null || !bot.GuildPermissions.ManageRoles)
+            {
+                await ReplyAsync("I need Manage Roles to award leveling roles.");
+                return false;
+            }
+
+            if (role.Position >= bot.Hierarchy)
+            {
+                await ReplyAsync("The reward role must be below my highest role.");
+                return false;
+            }
+
+            if (Context.User.Id != Context.Guild.OwnerId)
+            {
+                if (Context.User is not SocketGuildUser moderator ||
+                    moderator.Guild.Id != Context.Guild.Id)
+                {
+                    await ReplyAsync("I could not verify your server role. Please try again.");
+                    return false;
+                }
+
+                if (role.Position >= moderator.Hierarchy)
+                {
+                    await ReplyAsync("The reward role must be below your highest role.");
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private async Task SaveChangeAsync(
+            Func<CancellationToken, Task> update,
+            string setting,
+            string value,
+            string message)
+        {
+            await update(_lifetime.ApplicationStopping);
+
+            _logger.LogInformation(
+                "Moderator {ModeratorId} set leveling {Setting} to {Value} in guild {GuildId}.",
+                Context.User.Id, setting, value, Context.Guild.Id);
+
+            await ReplyAsync(message);
+            await _auditChannelService.WriteAsync(
+                new ModerationAuditEntry(
+                    Context.Guild.Id,
+                    "Leveling settings changed",
+                    Context.User.Id,
+                    null,
+                    "Bot settings changed.",
+                    $"{setting}: {value}.",
+                    DateTimeOffset.UtcNow),
+                _lifetime.ApplicationStopping);
+        }
+
+        private static string FormatList<T>(IReadOnlyList<T> items, Func<T, string> format)
+        {
+            if (items.Count == 0)
+            {
+                return "None";
+            }
+
+            // Leave room for the omitted count within Discord's 1024-character field limit.
+            var text = new StringBuilder();
+            var shown = 0;
+            while (shown < items.Count && shown < 20)
+            {
+                var line = format(items[shown]);
+                if (text.Length + line.Length + 1 > 960)
+                {
+                    break;
+                }
+
+                text.AppendLine(line);
+                shown++;
+            }
+
+            if (shown < items.Count)
+            {
+                text.Append($"… and {items.Count - shown} more.");
+            }
+
+            return text.ToString().TrimEnd();
+        }
     }
 
     [Group("warnings", "Configure warning escalation.")]

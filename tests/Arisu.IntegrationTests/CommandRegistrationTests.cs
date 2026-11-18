@@ -56,7 +56,11 @@ public sealed class CommandRegistrationTests
         [
             "ping", "help", "kick", "ban", "unban", "timeout", "untimeout", "nick",
             "warn", "warnings", "delwarn", "clearwarnings", "reason", "modlogs",
-            "purge", "slowmode", "lock", "unlock",
+            "purge", "slowmode", "lock", "unlock", "rank", "profile", "leaderboard",
+            "settings leveling enable", "settings leveling disable", "settings leveling status",
+            "settings leveling cooldown", "settings leveling exclude-channel", "settings leveling include-channel",
+            "settings leveling exclude-role", "settings leveling include-role",
+            "settings leveling reward-add", "settings leveling reward-remove",
             "voice mute", "voice unmute", "voice deafen", "voice undeafen", "voice disconnect", "voice move",
             "voicemaster setup", "voicemaster disable", "voicemaster rename", "voicemaster limit",
             "voicemaster lock", "voicemaster unlock", "voicemaster hide", "voicemaster show",
@@ -99,7 +103,8 @@ public sealed class CommandRegistrationTests
             typeof(IDiscordAutoModService), typeof(IHostApplicationLifetime), typeof(IChannelLockService),
             typeof(IAuditChannelService), typeof(IModerationHistoryStore), typeof(IGuildChannelConfigurationStore),
             typeof(IMemberLogChannelService), typeof(IGuildEventBackgroundService), typeof(IGuildEventChannelService),
-            typeof(IImageGenerationService), typeof(IImageGenerationRequestLimiter), typeof(IVoiceMasterService)
+            typeof(IImageGenerationService), typeof(IImageGenerationRequestLimiter), typeof(IVoiceMasterService),
+            typeof(ILevelingStore), typeof(ILevelingCardService)
         ];
         foreach (var dependency in dependencies)
         {

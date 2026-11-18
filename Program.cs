@@ -141,6 +141,9 @@ builder.Services.AddSingleton(serviceProvider =>
 });
 builder.Services.AddSingleton<IModerationHistoryStore, PostgresModerationHistoryStore>();
 builder.Services.AddSingleton<IVoiceMasterStore, PostgresVoiceMasterStore>();
+builder.Services.AddSingleton<ILevelingStore, PostgresLevelingStore>();
+builder.Services.AddSingleton<LevelingService>();
+builder.Services.AddSingleton<ILevelingCardService, LevelingCardService>();
 builder.Services.AddSingleton<VoiceMasterService>();
 builder.Services.AddSingleton<IVoiceMasterService>(serviceProvider =>
     serviceProvider.GetRequiredService<VoiceMasterService>());
@@ -182,6 +185,7 @@ builder.Services.AddHostedService<GuildEventNotificationService>();
 builder.Services.AddHostedService<ModerationAuditLogService>();
 builder.Services.AddHostedService<MemberLogService>();
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<VoiceMasterService>());
+builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<LevelingService>());
 builder.Services.AddHostedService<DiscordBotHostedService>();
 // Start after the client so shutdown drains accepted logs before Discord logs out.
 builder.Services.AddHostedService(serviceProvider => serviceProvider.GetRequiredService<GatewayLogQueue>());

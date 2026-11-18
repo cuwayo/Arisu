@@ -10,6 +10,7 @@ small, dependency-injection-friendly codebase for extending the bot.
 - Join-to-create temporary voice rooms with owner customization and access controls.
 - Native Discord AutoMod for spam, mentions, invites, and blocked words.
 - Persistent warning management, moderation cases, and in-Discord command help.
+- Optional per-guild message leveling, member cards, and role rewards.
 - Permission and role-hierarchy checks before moderation actions.
 - Ephemeral moderator responses and audit-log reasons.
 - Optional direct-message notification for timeouts.
@@ -334,6 +335,54 @@ Manage Server. Invite filtering matches ordinary Discord invite links;
 obfuscated links can bypass it. This implementation does not add custom
 message-rate thresholds, account-age checks, join-raid detection, CAPTCHA,
 phishing reputation, scheduled bans, or a web dashboard.
+
+## Message leveling
+
+Message leveling is optional and disabled by default in each guild. Admins can
+opt in and configure it with:
+
+```text
+/settings leveling enable
+/settings leveling disable
+/settings leveling status
+/settings leveling cooldown seconds:60
+/settings leveling exclude-channel channel:#off-topic
+/settings leveling include-channel channel:#off-topic
+/settings leveling exclude-role role:@No XP
+/settings leveling include-role role:@No XP
+/settings leveling reward-add level:5 role:@Level 5
+/settings leveling reward-remove level:5
+```
+
+Arisu records no XP while leveling is disabled. Only human guild messages can
+earn XP; bot and webhook messages are excluded. Leveling does not require the
+Message Content Intent. Excluded channels and members with excluded roles do
+not earn XP. Channel exclusions apply to the selected channel ID, not its
+threads. Use `include-channel` or `include-role` to remove an exclusion.
+
+Each accepted message awards 15–25 XP. The per-member cooldown defaults to
+60 seconds and accepts values from 15 to 3,600 seconds. Cooldowns persist across
+restarts. Level `L` requires `100 * L * L` total XP. XP starts when the feature is
+enabled; Arisu does not import past messages. Processing uses a bounded queue
+and is best effort: messages can be skipped during overload or shutdown.
+
+Role rewards grant eligible configured roles after an accepted message when
+members meet their level requirements. Configure levels from 1 to 1,000, with
+one role per level. Adding a reward requires both Manage Server and Manage
+Roles. Arisu needs Manage Roles and a role above the reward role.
+Managed roles, `@everyone`, and roles with moderation or administrative
+permissions cannot be rewards. Missing eligible roles are retried on later
+accepted messages. Arisu does not automatically remove granted roles, including
+when an admin removes a reward configuration.
+
+Members can use `/rank [user]` and `/profile [user]` to view member progress.
+These commands post public image cards in the channel and fall back to public
+embeds if rendering or upload fails. `/leaderboard [page]` shows the guild's
+all-time standings in a public embed, with 10 members per page.
+Square brackets indicate optional arguments.
+
+This first release does not include voice XP, an economy, monthly leaderboards,
+or level-up announcements.
 
 ## Warnings
 
